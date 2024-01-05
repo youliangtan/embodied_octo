@@ -165,13 +165,14 @@ class PositionalEncoding(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    d_model : int         # Hidden dimensionality of the input.
-    max_len : int = 5000  # Maximum length of a sequence to expect.
+    d_model: int         # Hidden dimensionality of the input.
+    max_len: int = 5000  # Maximum length of a sequence to expect.
 
     def setup(self):
         # Create matrix of [SeqLen, HiddenDim] representing the positional encoding for max_len inputs
-        position = jnp.arange(0, self.max_len, dtype=jnp.float32)[:,None]
-        div_term = jnp.exp(jnp.arange(0, self.d_model, 2) * (-jnp.log(10000.0) / self.d_model))
+        position = jnp.arange(0, self.max_len, dtype=jnp.float32)[:, None]
+        div_term = jnp.exp(jnp.arange(0, self.d_model, 2) *
+                           (-jnp.log(10000.0) / self.d_model))
         pe = jnp.zeros((self.max_len, self.d_model))
         pe = pe.at[:, 0::2].set(jnp.sin(position * div_term))
         pe = pe.at[:, 1::2].set(jnp.cos(position * div_term))
@@ -182,13 +183,15 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, :x.shape[1]]
         return x
 
+
 class TransformerPredictor(nn.Module):
-    model_dim : int                   # Hidden dimensionality to use inside the Transformer
-    num_classes : int                 # Number of classes to predict per sequence element
-    num_heads : int                   # Number of heads to use in the Multi-Head Attention blocks
-    num_layers : int                  # Number of encoder blocks to use
-    dropout_prob : float = 0.0        # Dropout to apply inside the model
-    input_dropout_prob : float = 0.0  # Dropout to apply on the input features
+    model_dim: int                   # Hidden dimensionality to use inside the Transformer
+    num_classes: int                 # Number of classes to predict per sequence element
+    # Number of heads to use in the Multi-Head Attention blocks
+    num_heads: int
+    num_layers: int                  # Number of encoder blocks to use
+    dropout_prob: float = 0.0        # Dropout to apply inside the model
+    input_dropout_prob: float = 0.0  # Dropout to apply on the input features
 
     def setup(self):
         # Input dim -> Model dim
@@ -229,7 +232,8 @@ class TransformerPredictor(nn.Module):
             # Aggregate sequence embeddings into a single embedding
             x = x.mean(axis=1)
         for l in self.output_net:
-            x = l(x) if not isinstance(l, nn.Dropout) else l(x, deterministic=not train)
+            x = l(x) if not isinstance(l, nn.Dropout) else l(
+                x, deterministic=not train)
         return x
 
     def get_attention_maps(self, x, mask=None, add_positional_encoding=True, train=True):
@@ -241,14 +245,15 @@ class TransformerPredictor(nn.Module):
         x = self.input_layer(x)
         if add_positional_encoding:
             x = self.positional_encoding(x)
-        attention_maps = self.transformer.get_attention_maps(x, mask=mask, train=train)
+        attention_maps = self.transformer.get_attention_maps(
+            x, mask=mask, train=train)
         return attention_maps
 
 
 ##############################################################################
 
 if __name__ == '__main__':
-    ## Test TransformerPredictor implementation
+    # Test TransformerPredictor implementation
     # Example features as input
     # main_rng, x_rng = random.split(main_rng)
     # x = random.normal(x_rng, (3, 16, 64))
@@ -263,51 +268,21 @@ if __name__ == '__main__':
                                     num_heads=4,
                                     dropout_prob=0.15,
                                     input_dropout_prob=0.05)
-    
+
     # Initialize parameters of transformer predictor with random key and inputs
     main_rng, init_rng, dropout_init_rng = random.split(main_rng, 3)
-    params = transpre.init({'params': init_rng, 'dropout': dropout_init_rng}, x, train=True)['params']
+    params = transpre.init(
+        {'params': init_rng, 'dropout': dropout_init_rng}, x, train=True)['params']
 
     # Apply transformer predictor with parameters on the inputs
     # Since dropout is stochastic, we need to pass a rng to the forward
     main_rng, dropout_apply_rng = random.split(main_rng)
     # Instead of passing params and rngs every time to a function call, we can bind them to the module
-    binded_mod = transpre.bind({'params': params}, rngs={'dropout': dropout_apply_rng})
+    binded_mod = transpre.bind({'params': params}, rngs={
+                               'dropout': dropout_apply_rng})
     out = binded_mod(x, train=True, return_embedding=True)
     print('Out', out.shape)
     attn_maps = binded_mod.get_attention_maps(x, train=True)
     print('Attention maps', len(attn_maps), attn_maps[0].shape)
 
     del transpre, binded_mod, params
-    # # Test TransformerEncoder implementation
-    # # Example features as input
-    # main_rng, x_rng = random.split(main_rng)
-
-    # input_shape = (3, 16, 128)
-    # # x = random.normal(x_rng, (3, 16, 128))
-
-    # input_shape = (1, 1, 784)
-    # x = jnp.ones(input_shape)
-    
-    # # Create Transformer encoder
-    # transenc = TransformerEncoder(num_layers=5,
-    #                               input_dim=128,
-    #                               num_heads=4,
-    #                               dim_feedforward=256,
-    #                               dropout_prob=0.15)
-    # # Initialize parameters of transformer with random key and inputs
-    # main_rng, init_rng, dropout_init_rng = random.split(main_rng, 3)
-    # params = transenc.init(
-    #     {'params': init_rng, 'dropout': dropout_init_rng}, x, train=True)['params']
-    # # Apply transformer with parameters on the inputs
-    # # Since dropout is stochastic, we need to pass a rng to the forward
-    # main_rng, dropout_apply_rng = random.split(main_rng)
-    # # Instead of passing params and rngs every time to a function call, we can bind them to the module
-    # binded_mod = transenc.bind({'params': params}, rngs={
-    #                            'dropout': dropout_apply_rng})
-    # out = binded_mod(x, train=True)
-    # print('In  :', x.shape)
-    # print('Out :', out.shape)
-    # attn_maps = binded_mod.get_attention_maps(x, train=True)
-    # print('Attention maps', len(attn_maps), attn_maps[0].shape)
-

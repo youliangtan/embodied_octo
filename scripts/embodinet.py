@@ -1,11 +1,4 @@
-import jax
-import jax.numpy as jnp
-from jax import random, grad
-from flax import linen as nn
-from flax.training import train_state
-import optax
-import tensorflow_datasets as tfds
-import tensorflow as tf
+#!/usr/bin/env python3
 
 import jax
 import jax.numpy as jnp
@@ -34,23 +27,15 @@ def load_mnist(split: str):
 
 def organize_by_class(images, labels):
     """Organize images by class buckets"""
-    class_buckets = {}
-    for i in range(10):  # MNIST has 10 classes
-        class_buckets[i] = images[labels == i]
-    return class_buckets
+    return {i: images[labels == i] for i in range(10)}
 
 
 def get_triplet(class_buckets, rng, batch_size):
     """function to sample a triplet"""
-    anchor_images = []
-    positive_images = []
-    negative_images = []
-
+    anchor_imgs, positive_imgs, negative_imgs = [], [], []
     for _ in range(batch_size):
-        # Split the random key
-        rng, anchor_rng = random.split(rng)
-        rng, positive_rng = random.split(rng)
-        rng, negative_rng = random.split(rng)
+        # generate random numbers
+        rng, anchor_rng, positive_rng, negative_rng = random.split(rng, 4)
 
         # Randomly select a class for anchor and positive
         anchor_class = random.choice(anchor_rng, np.array(range(10))).item()
@@ -70,31 +55,20 @@ def get_triplet(class_buckets, rng, batch_size):
         negative_idx = random.choice(negative_rng, len(
             class_buckets[negative_class]), shape=()).item()
 
-        anchor_images.append(class_buckets[anchor_class][anchor_idx])
-        positive_images.append(class_buckets[anchor_class][positive_idx])
-        negative_images.append(class_buckets[negative_class][negative_idx])
+        anchor_imgs.append(class_buckets[anchor_class][anchor_idx])
+        positive_imgs.append(class_buckets[anchor_class][positive_idx])
+        negative_imgs.append(class_buckets[negative_class][negative_idx])
 
     # Convert lists to jnp arrays
-    anchors = jnp.stack(anchor_images)
-    positives = jnp.stack(positive_images)
-    negatives = jnp.stack(negative_images)
+    return jnp.stack(anchor_imgs), jnp.stack(positive_imgs), jnp.stack(negative_imgs)
 
-    return anchors, positives, negatives
-
+##############################################################################
 
 class ConvEncoder(nn.Module):
     latent_dim: int = 16
 
     @nn.compact
     def __call__(self, x):
-        # x = x.reshape((x.shape[0], -1))  # Flatten the image
-        # # conv then dense
-        # x = nn.Dense(256)(x)
-        # x = nn.relu(x)
-        # x = nn.Dense(256)(x)
-        # x = nn.relu(x)
-        # return x
-
         # 2 conv, max_and 2 dense
         x = nn.Conv(features=32, kernel_size=(3, 3))(x)
         x = nn.relu(x)
@@ -123,23 +97,22 @@ def make_embodinet(type: str, latent_dim: int):
     else:
         raise ValueError("Invalid model type")
 
-# Define triplet loss
 # TODO: use different loss function
 
 
 def triplet_loss(anchor, positive, negative, margin=0.2):
+    """Define triplet loss"""
     pos_dist = jnp.sum(jnp.square(anchor - positive), axis=1)
     neg_dist = jnp.sum(jnp.square(anchor - negative), axis=1)
     basic_loss = pos_dist - neg_dist + margin
     loss = jnp.maximum(basic_loss, 0.0)
-    # print("loss shape:", loss.shape)
-    # print("loss:", loss)
     return jnp.mean(loss)
 
 ##############################################################################
 
+
 MODEL_TYPE = "conv"  # TODO: configurable
-# MODEL_TYPE = "transformer"
+MODEL_TYPE = "transformer"
 BATCH_SIZE = 8
 EPOCHS = 10
 LATENT_DIM = 3
@@ -166,8 +139,8 @@ if __name__ == '__main__':
     model = make_embodinet(type=MODEL_TYPE, latent_dim=LATENT_DIM)
 
     # replicate model across devices TODO: fix this
-    sharded_model = [jax.tree_map(lambda x: x[i], model) for i in range(num_devices)]
-    model = jax.device_put_sharded(sharded_model, jax.local_devices())
+    # sharded_model = [jax.tree_map(lambda x: x[i], model) for i in range(num_devices)]
+    # model = jax.device_put_sharded(sharded_model, jax.local_devices())
 
     if MODEL_TYPE == "conv":
         input_shape = (1, 28, 28, 1)
@@ -195,9 +168,12 @@ if __name__ == '__main__':
     def train_step(state, batch, rngs):
         def loss_fn(params):
             anchors, positives, negatives = batch
-            anchor_embeddings = state.apply_fn({'params': params}, anchors    , rngs=rngs)
-            positive_embeddings = state.apply_fn({'params': params}, positives, rngs=rngs)
-            negative_embeddings = state.apply_fn({'params': params}, negatives, rngs=rngs)
+            anchor_embeddings = state.apply_fn(
+                {'params': params}, anchors, rngs=rngs)
+            positive_embeddings = state.apply_fn(
+                {'params': params}, positives, rngs=rngs)
+            negative_embeddings = state.apply_fn(
+                {'params': params}, negatives, rngs=rngs)
             loss = triplet_loss(anchor_embeddings,
                                 positive_embeddings, negative_embeddings)
             return loss
@@ -227,7 +203,8 @@ if __name__ == '__main__':
             positives = positives.reshape(-1, 784, 1)
             negatives = negatives.reshape(-1, 784, 1)
 
-        state, loss = train_step(state, (anchors, positives, negatives), rngs={'dropout': rng})
+        state, loss = train_step(
+            state, (anchors, positives, negatives), rngs={'dropout': rng})
         print(f'Epoch {epoch} done', loss)
 
     print('Training complete.')
@@ -250,7 +227,7 @@ if __name__ == '__main__':
     # Get embeddings for the test images
     first_10_digits = jnp.stack(first_10_digits)
     second_10_digits = jnp.stack(second_10_digits)
-    
+
     if MODEL_TYPE == "transformer":
         first_10_digits = first_10_digits.reshape(-1, 784, 1)
         second_10_digits = second_10_digits.reshape(-1, 784, 1)
