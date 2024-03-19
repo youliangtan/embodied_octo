@@ -14,7 +14,6 @@ from transformer import TransformerPredictor
 # Load MNIST dataset
 # Load and preprocess MNIST dataset
 
-
 def load_mnist(split: str):
     ds, ds_info = tfds.load('mnist', split=split,
                             as_supervised=True, with_info=True, batch_size=-1)
