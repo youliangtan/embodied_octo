@@ -9,13 +9,12 @@ Dependencies:
  - Open embodiments dataset: https://github.com/google-deepmind/open_x_embodiment
 
 
-Simple experimentation with mnist dataset
-```bash
-# internal configs
-python3 embodiednet.py
-```
+## Usage
 
-Simple mujoco scripted policy for embodied constrastive learning model (clip like)
+1. Generate dataset with: https://github.com/rail-berkeley/mujoco_manipulation
+
+2. Train the model with the generated dataset:
+
 ```bash
-python embodied_clip.py -d DATASET_PATH
+python3 embodied_clip.py -d /hdd/mujoco_arms/widowx_shoe_pick_and_place_combined/ -b 5 -t 12 -e 100
 ```
