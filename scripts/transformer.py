@@ -187,8 +187,7 @@ class PositionalEncoding(nn.Module):
 class TransformerPredictor(nn.Module):
     model_dim: int                   # Hidden dimensionality to use inside the Transformer
     num_classes: int                 # Number of classes to predict per sequence element
-    # Number of heads to use in the Multi-Head Attention blocks
-    num_heads: int
+    num_heads: int                   # Number of heads to use in the Multi-Head Attention blocks
     num_layers: int                  # Number of encoder blocks to use
     dropout_prob: float = 0.0        # Dropout to apply inside the model
     input_dropout_prob: float = 0.0  # Dropout to apply on the input features

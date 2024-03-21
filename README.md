@@ -16,5 +16,5 @@ Dependencies:
 2. Train the model with the generated dataset:
 
 ```bash
-python3 embodied_clip.py -d /hdd/mujoco_arms/widowx_shoe_pick_and_place_combined/ -b 5 -t 12 -e 100
+python3 embodied_clip.py -d /hdd/mujoco_arms/widowx_shoe_pick_and_place_combined/ -b 16 -t 12 -e 100
 ```
