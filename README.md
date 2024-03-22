@@ -13,6 +13,10 @@ Dependencies:
 
 1. Generate dataset with: https://github.com/rail-berkeley/mujoco_manipulation
 
+```bash
+python data_collection/collect_scripted.py --task widowx_shoe_pick_and_place  -d /hdd/mujoco_arms/ -nt 2000 -t 15 -p 10
+```
+
 2. Train the model with the generated dataset:
 
 ```bash

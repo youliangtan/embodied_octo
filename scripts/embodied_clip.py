@@ -17,6 +17,7 @@ import tensorflow as tf
 import wandb
 from utils import Timer
 from typing import Any
+from networks import FilmConditioning, FilmConditioning3D
 
 # explicitly set the memory allocation to avoid OOM
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -51,16 +52,26 @@ class ConvEncoder(nn.Module):
 
 
 class Conv3DEncoder(nn.Module):
+    """
+    Simple 3D Convolutional Encoder
+    # TODO: Film conditioning with mesh embedding
+    """
     latent_dim: int = 64
+    use_film: bool = False
 
     @nn.compact
-    def __call__(self, x, is_training=True):
+    def __call__(self, x, cond, is_training=True):
         # 2 conv, max_and 2 dense
         x = nn.Conv(features=16, kernel_size=(3, 3, 3))(x)
         x = nn.BatchNorm(use_running_average=not is_training)(x)
+        if self.use_film:
+            x = FilmConditioning3D()(x, cond)
         x = nn.relu(x)
         x = nn.Conv(features=32, kernel_size=(3, 3, 3))(x)
-        x = nn.Conv(features=32, kernel_size=(3, 3, 3))(x)
+        x = nn.BatchNorm(use_running_average=not is_training)(x)
+        if self.use_film:
+            x = FilmConditioning3D()(x, cond)
+
         x = nn.max_pool(x, window_shape=(2, 2, 2), strides=(2, 2, 2))
         # flatten
         x = x.reshape((x.shape[0], -1))
@@ -79,11 +90,17 @@ class TrajectoryEncoder(nn.Module):
     """
     img_latent_dim: int = 64
     encoding_dim: int = 16
+    use_film: bool = False
 
     @nn.compact
-    def __call__(self, image, action, is_training=True):
+    def __call__(self, images, actions, is_training=True):
         # 3D Convolutional Encoder
-        x = Conv3DEncoder(latent_dim=self.img_latent_dim)(image, is_training)
+        x = Conv3DEncoder(latent_dim=self.img_latent_dim, use_film=self.use_film)(
+            images,
+            cond=actions,
+            is_training=is_training
+        )
+
         # flatten the action
         action = action.reshape((action.shape[0], -1))
         x = jnp.hstack([x, action])  # now concatenate x and action
@@ -105,14 +122,20 @@ class TrajectoryAttentionEncoder(nn.Module):
     """
     img_latent_dim: int = 64
     encoding_dim: int = 16
+    use_film: bool = True
 
     @nn.compact
-    def __call__(self, image, action, is_training=True):
+    def __call__(self, images, actions, is_training=True):
         # 3D Convolutional Encoder
-        x = Conv3DEncoder(latent_dim=self.img_latent_dim)(image, is_training)
+        x = Conv3DEncoder(latent_dim=self.img_latent_dim, use_film=self.use_film)(
+            images,
+            cond=actions,
+            is_training=is_training
+        )
+
         # flatten the action
-        action = action.reshape((action.shape[0], -1))
-        x = jnp.hstack([x, action])
+        actions = actions.reshape((actions.shape[0], -1))
+        x = jnp.hstack([x, actions])
         # reshape the [batch, seq] to [batch, seq, features] with features = 1
         x = x.reshape((x.shape[0], x.shape[1], 1))
         x = TransformerPredictor(
@@ -159,9 +182,11 @@ def denormalize(x, min_val, max_val):
     return x * (max_val - min_val) + min_val
 
 
-def validate_model(test_ds_iter, model, train_state, norm_min, norm_max,
-                   num_samples=10, rngs={'dropout': random.PRNGKey(0)}
-                   ):
+def validate_model(
+    test_ds_iter, model, train_state, norm_min, norm_max,
+    num_samples=10, rngs={'dropout': random.PRNGKey(0)}
+):
+    """Validate the model on the test dataset."""
     diff = jnp.zeros((7))
     mse = 0
     sample_labels, sample_preds = None, None  # hack to get the last sample
@@ -219,6 +244,9 @@ if __name__ == "__main__":
                         default=15, help='Length of trajectory')
     parser.add_argument('--model', '-m', type=str,
                         default="mlp", help='Model to use')
+    parser.add_argument('--session_name', '-n', type=str,
+                        default=None, help='Session name')
+    parser.add_argument('--use_film', '-f', action='store_true')
     args = parser.parse_args()
 
     train_dataset_dir = os.path.join(args.data_path, 'train')
@@ -228,7 +256,11 @@ if __name__ == "__main__":
                            traj_size=args.traj_length)
 
     # init wandb
-    wandb.init(project="embodied_octo", group="camera profile prediction")
+    wandb.init(project="embodied_octo",
+               group="camera profile prediction",
+               name=args.session_name
+               )
+    wandb.config.update(args)
 
     devices = jax.local_devices()
     shard_count = len(devices)
@@ -258,13 +290,15 @@ if __name__ == "__main__":
         f"Shapes: Images: {images_shape}, States: {states_shape}, Actions: {actions_shape}")
 
     if args.model == "mlp":
-        model = TrajectoryEncoder(img_latent_dim=128, encoding_dim=7)
+        model = TrajectoryEncoder(img_latent_dim=128, encoding_dim=7, use_film=args.use_film)
     elif args.model == "transformer":
-        model = TrajectoryAttentionEncoder(img_latent_dim=128, encoding_dim=7)
+        model = TrajectoryAttentionEncoder(img_latent_dim=128, encoding_dim=7, use_film=args.use_film)
     else:
         raise ValueError(f"Model {args.model} not implemented")
 
-    optimizer = optax.adam(learning_rate=1e-3)
+    optimizer = optax.adam(
+        learning_rate=3e-4,  # 1e-3
+    )
 
     # Sample first 100 data points to get the normalization range
     data = next(iterator)
@@ -278,7 +312,8 @@ if __name__ == "__main__":
             data['cam_profile'], axis=0))
     norm_min = jnp.mean(jnp.array(norm_min), axis=0)
     norm_max = jnp.mean(jnp.array(norm_max), axis=0)
-    print(f"Normalization range: {norm_min} - {norm_max}")
+    print(
+        f"Normalization range: {pretty_list(norm_min)} - {pretty_list(norm_max)}")
 
     # TODO: normalize input data too?
 
@@ -336,13 +371,13 @@ if __name__ == "__main__":
         (args.batch_size, args.traj_length, states_shape[2] + actions_shape[2]))
     # (args.batch_size, args.traj_length, states_shape[2]))
 
-    variables = model.init(rngs, init_img_data, init_act_data, is_training=False)
+    variables = model.init(rngs, init_img_data,
+                           init_act_data, is_training=False)
     params = variables['params']
 
     print(
         f"Total number of parameters: {count_params(params)}, "
         f"equivalent to {count_params(params) * 4 / 1024 / 1024} MB")
-
 
     # from batch borm
     # https://flax.readthedocs.io/en/latest/guides/training_techniques/batch_norm.html
