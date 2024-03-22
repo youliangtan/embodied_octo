@@ -16,6 +16,7 @@ import os
 import tensorflow as tf
 import wandb
 from utils import Timer
+from typing import Any
 
 # explicitly set the memory allocation to avoid OOM
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -24,6 +25,9 @@ os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 
 
 def print_yellow(x): return print("\033[33m", x, "\033[0m")
+
+
+def pretty_list(x): return [round(float(i), 2) for i in x]
 
 
 class ConvEncoder(nn.Module):
@@ -50,17 +54,19 @@ class Conv3DEncoder(nn.Module):
     latent_dim: int = 64
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, is_training=True):
         # 2 conv, max_and 2 dense
         x = nn.Conv(features=16, kernel_size=(3, 3, 3))(x)
+        x = nn.BatchNorm(use_running_average=not is_training)(x)
         x = nn.relu(x)
+        x = nn.Conv(features=32, kernel_size=(3, 3, 3))(x)
         x = nn.Conv(features=32, kernel_size=(3, 3, 3))(x)
         x = nn.max_pool(x, window_shape=(2, 2, 2), strides=(2, 2, 2))
         # flatten
         x = x.reshape((x.shape[0], -1))
         x = nn.Dense(128)(x)
         x = nn.relu(x)
-        x = nn.Dense(64)(x)
+        x = nn.Dense(128)(x)
         x = nn.relu(x)
         x = nn.Dense(self.latent_dim)(x)
         return x
@@ -75,9 +81,9 @@ class TrajectoryEncoder(nn.Module):
     encoding_dim: int = 16
 
     @nn.compact
-    def __call__(self, image, action):
+    def __call__(self, image, action, is_training=True):
         # 3D Convolutional Encoder
-        x = Conv3DEncoder(latent_dim=self.img_latent_dim)(image)
+        x = Conv3DEncoder(latent_dim=self.img_latent_dim)(image, is_training)
         # flatten the action
         action = action.reshape((action.shape[0], -1))
         x = jnp.hstack([x, action])  # now concatenate x and action
@@ -89,6 +95,34 @@ class TrajectoryEncoder(nn.Module):
         x = nn.Dense(128)(x)
         x = nn.relu(x)
         x = nn.Dense(self.encoding_dim)(x)
+        return x
+
+
+class TrajectoryAttentionEncoder(nn.Module):
+    """
+    trajectory encoder uses the Conv3DEncoder,
+    and stack an action array of size 7, then a transformer
+    """
+    img_latent_dim: int = 64
+    encoding_dim: int = 16
+
+    @nn.compact
+    def __call__(self, image, action, is_training=True):
+        # 3D Convolutional Encoder
+        x = Conv3DEncoder(latent_dim=self.img_latent_dim)(image, is_training)
+        # flatten the action
+        action = action.reshape((action.shape[0], -1))
+        x = jnp.hstack([x, action])
+        # reshape the [batch, seq] to [batch, seq, features] with features = 1
+        x = x.reshape((x.shape[0], x.shape[1], 1))
+        x = TransformerPredictor(
+            num_layers=3,
+            model_dim=64,
+            num_classes=self.encoding_dim,
+            num_heads=4,
+            dropout_prob=0.15,
+            input_dropout_prob=0.05
+        )(x, return_embedding=True)
         return x
 
 
@@ -125,10 +159,12 @@ def denormalize(x, min_val, max_val):
     return x * (max_val - min_val) + min_val
 
 
-def validate_model(test_ds_iter, model, train_state, norm_min, norm_max, num_samples=10):
+def validate_model(test_ds_iter, model, train_state, norm_min, norm_max,
+                   num_samples=10, rngs={'dropout': random.PRNGKey(0)}
+                   ):
     diff = jnp.zeros((7))
     mse = 0
-    sample_labels, sample_preds = None, None # hack to get the last sample
+    sample_labels, sample_preds = None, None  # hack to get the last sample
     for i in range(num_samples):
         data = next(test_ds_iter)
         images = jnp.array(data['images'])
@@ -140,33 +176,34 @@ def validate_model(test_ds_iter, model, train_state, norm_min, norm_max, num_sam
         cam_profile = jnp.array(data['cam_profile'])
 
         norm_cam_profile = normalize(cam_profile, norm_min, norm_max)
-        preds = model.apply({'params': train_state.params},
-                            images, state_actions)
+        preds = model.apply(
+            {'params': train_state.params, 'batch_stats': train_state.batch_stats},
+            images,
+            state_actions,
+            is_training=False,
+            rngs=rngs,
+        )
         preds_denorm = denormalize(preds, norm_min, norm_max)
-        
-        sample_labels = cam_profile[0]
-        sample_preds = preds_denorm[0]
-
         diff += jnp.mean(jnp.abs(preds_denorm - cam_profile), axis=0)
         mse += jnp.mean(jnp.square(preds - norm_cam_profile))
 
+        sample_labels, sample_preds = cam_profile[0], preds_denorm[0]
+
     diff /= num_samples
-    print(f" - Val | Average Diff: {diff}, with avg mse: {mse/num_samples}")
+    print(
+        f" - Val | Average Diff: {pretty_list(diff)}, with avg mse: {mse/num_samples}")
 
     wandb.log({"average_mse": mse/num_samples})
     for i in range(len(diff)):
         wandb.log({f"diff_{i}": diff[i]})
-    
-    # print("Sample labels and preds", sample_labels.shape, sample_preds.shape)
+
     # cherrypick one of the sample to log
-    # for i in range(len(sample_labels)):
-    #     wandb.log({f"sample_label_{i}": sample_labels[i]})
-    #     wandb.log({f"sample_pred_{i}": sample_preds[i]})
-    
-    print("Sample labels and preds", sample_labels, sample_preds)
     # print it the array with round 2 decimal
+    print("Sample labels and preds", pretty_list(
+        sample_labels), pretty_list(sample_preds))
 
 ########################################################################################
+
 
 if __name__ == "__main__":
     import argparse
@@ -221,7 +258,9 @@ if __name__ == "__main__":
         f"Shapes: Images: {images_shape}, States: {states_shape}, Actions: {actions_shape}")
 
     if args.model == "mlp":
-        model = TrajectoryEncoder(img_latent_dim=64, encoding_dim=7)
+        model = TrajectoryEncoder(img_latent_dim=128, encoding_dim=7)
+    elif args.model == "transformer":
+        model = TrajectoryAttentionEncoder(img_latent_dim=128, encoding_dim=7)
     else:
         raise ValueError(f"Model {args.model} not implemented")
 
@@ -240,11 +279,11 @@ if __name__ == "__main__":
     norm_min = jnp.mean(jnp.array(norm_min), axis=0)
     norm_max = jnp.mean(jnp.array(norm_max), axis=0)
     print(f"Normalization range: {norm_min} - {norm_max}")
-    
+
     # TODO: normalize input data too?
 
     @jax.jit
-    def train_step(state, batch):
+    def train_step(state, batch, rngs):
         def loss_fn(params, l2_reg=0):
             # forward pass,
             images, states, actions, cam_profile = \
@@ -254,7 +293,13 @@ if __name__ == "__main__":
             # state_actions = actions
 
             # TODO: now assume states as actions, need to change
-            preds = model.apply({'params': params}, images, state_actions)
+            preds, updates = model.apply(
+                {'params': params, 'batch_stats': state.batch_stats},
+                images,
+                state_actions,
+                rngs=rngs,
+                mutable=['batch_stats'],
+            )
 
             # L2 regularization
             # https://github.com/google/flax/discussions/1654
@@ -267,36 +312,50 @@ if __name__ == "__main__":
 
             # total loss
             loss = mse_loss + l2_reg * l2_reg_loss
-            return loss
+            return loss, updates
 
         # compute the gradient
-        grad_fn = jax.value_and_grad(loss_fn)
-        loss, grad = grad_fn(state.params)
+        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        (loss, updates), grad = grad_fn(state.params)
+
         # update the optimizer TODO: is this needed?
-        updates, new_opt_state = optimizer.update(grad, state.opt_state)
-        # update the model
         new_state = state.apply_gradients(grads=grad)
-        return new_state, new_opt_state, loss
+        state = state.replace(params=new_state.params,
+                              opt_state=new_state.opt_state,
+                              batch_stats=updates['batch_stats'])
+        return new_state, loss
 
     # initialize the model
     rng = random.PRNGKey(0)
-    rng, key = random.split(rng)
+    init_rng, dropout_rng = random.split(rng, 2)
+    rngs = {'params': init_rng, 'dropout': dropout_rng}
 
     init_img_data = jnp.ones(
         (args.batch_size, args.traj_length, images_shape[2], images_shape[3], images_shape[4]))
     init_act_data = jnp.ones(
         (args.batch_size, args.traj_length, states_shape[2] + actions_shape[2]))
-        # (args.batch_size, args.traj_length, states_shape[2]))
+    # (args.batch_size, args.traj_length, states_shape[2]))
 
-    params = model.init(key, init_img_data, init_act_data)['params']
+    variables = model.init(rngs, init_img_data, init_act_data, is_training=False)
+    params = variables['params']
 
     print(
-        f"Total number of parameters: {count_params(params)}, equivalent to {count_params(params) * 4 / 1024 / 1024} MB")
+        f"Total number of parameters: {count_params(params)}, "
+        f"equivalent to {count_params(params) * 4 / 1024 / 1024} MB")
+
+
+    # from batch borm
+    # https://flax.readthedocs.io/en/latest/guides/training_techniques/batch_norm.html
+    batch_stats = variables['batch_stats']
+
+    class TrainState(train_state.TrainState):
+        batch_stats: Any
 
     # opt_state = optimizer.init(params)
-    train_state = train_state.TrainState.create(
+    train_state = TrainState.create(
         apply_fn=model.apply,
         params=params,
+        batch_stats=batch_stats,
         tx=optimizer,
     )
 
@@ -307,30 +366,33 @@ if __name__ == "__main__":
     test_ds_iter = iter(test_dataset)
 
     timer = Timer()
+    ITERATIONS_PER_EPOCH = 50  # the number of iterations per epoch
 
     # training loop
     for epoch in range(args.num_epochs):
         avg_loss = 0
-        for i in range(50):  # 50 batches
+        for i in range(ITERATIONS_PER_EPOCH):
+            rng, key = random.split(rng)
 
-            with timer("data_loading"):
+            with timer("timer/data_loading"):
                 data = next(iterator)
             # Convert TensorFlow tensors to NumPy arrays
             data = {k: v.numpy() for k, v in data.items()}
 
-            with timer("train_step"):
-                train_state, opt_state, loss = train_step(train_state, data)
-
+            with timer("timer/train_step"):
+                train_state, loss = train_step(
+                    train_state, data, rngs={'dropout': rng}
+                )
             avg_loss += loss
 
-        avg_loss /= 50
+        avg_loss /= ITERATIONS_PER_EPOCH
         print_yellow(f"Epoch {epoch} | Average Loss: {avg_loss}")
-        
+
         # log after first epoch
         if epoch > 0:
             wandb.log({"average_loss": avg_loss})
             validate_model(test_ds_iter, model, train_state,
-                            norm_min, norm_max, num_samples=4)
+                           norm_min, norm_max, num_samples=4)
             wandb.log(timer.get_average_times(reset=True))
         else:
             timer.reset()

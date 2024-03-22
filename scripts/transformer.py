@@ -150,26 +150,6 @@ class PositionalEncoding(nn.Module):
 
     def setup(self):
         # Create matrix of [SeqLen, HiddenDim] representing the positional encoding for max_len inputs
-        pe = jnp.zeros((self.max_len, self.d_model))
-        position = jnp.arange(0, self.max_len, dtype=jnp.float32)[:, None]
-        div_term = jnp.exp(jnp.arange(0, self.d_model, 2) *
-                           (-jnp.log(10000.0) / self.d_model))
-        pe[:, 0::2] = jnp.sin(position * div_term)
-        pe[:, 1::2] = jnp.cos(position * div_term)
-        pe = pe[None]
-        self.pe = jax.device_put(pe)
-
-    def __call__(self, x):
-        x = x + self.pe[:, :x.shape[1]]
-        return x
-
-
-class PositionalEncoding(nn.Module):
-    d_model: int         # Hidden dimensionality of the input.
-    max_len: int = 5000  # Maximum length of a sequence to expect.
-
-    def setup(self):
-        # Create matrix of [SeqLen, HiddenDim] representing the positional encoding for max_len inputs
         position = jnp.arange(0, self.max_len, dtype=jnp.float32)[:, None]
         div_term = jnp.exp(jnp.arange(0, self.d_model, 2) *
                            (-jnp.log(10000.0) / self.d_model))
@@ -261,7 +241,7 @@ if __name__ == '__main__':
     x = jnp.ones(input_shape)
 
     # Create Transformer encoder
-    transpre = TransformerPredictor(num_layers=5,
+    transpred = TransformerPredictor(num_layers=5,
                                     model_dim=256,
                                     num_classes=10,
                                     num_heads=4,
@@ -270,18 +250,39 @@ if __name__ == '__main__':
 
     # Initialize parameters of transformer predictor with random key and inputs
     main_rng, init_rng, dropout_init_rng = random.split(main_rng, 3)
-    params = transpre.init(
+    params = transpred.init(
         {'params': init_rng, 'dropout': dropout_init_rng}, x, train=True)['params']
 
     # Apply transformer predictor with parameters on the inputs
     # Since dropout is stochastic, we need to pass a rng to the forward
     main_rng, dropout_apply_rng = random.split(main_rng)
     # Instead of passing params and rngs every time to a function call, we can bind them to the module
-    binded_mod = transpre.bind({'params': params}, rngs={
+    binded_mod = transpred.bind({'params': params}, rngs={
                                'dropout': dropout_apply_rng})
     out = binded_mod(x, train=True, return_embedding=True)
     print('Out', out.shape)
     attn_maps = binded_mod.get_attention_maps(x, train=True)
     print('Attention maps', len(attn_maps), attn_maps[0].shape)
 
-    del transpre, binded_mod, params
+    del transpred, binded_mod, params
+
+
+    @nn.compact
+    def __call__(self, x):
+        # 3 conv, max_pool and 3 dense
+        x = nn.Conv(features=16, kernel_size=(3, 3, 3))(x)
+        x = nn.BatchNorm(use_running_average=True)(x)
+        x = nn.leaky_relu(x)
+        x = nn.Conv(features=32, kernel_size=(3, 3, 3))(x)
+        # x = nn.BatchNorm(use_running_average=True)(x)
+        x = nn.leaky_relu(x)
+        x = nn.max_pool(x, window_shape=(2, 2, 2), strides=(2, 2, 2))
+        # flatten
+        x = x.reshape((x.shape[0], -1))
+        x = nn.Dense(128)(x)
+        x = nn.leaky_relu(x)
+        x = nn.Dense(128)(x)
+        x = nn.leaky_relu(x)
+        x = nn.Dense(self.latent_dim)(x)
+        print("Conv3DEncoder output shape", x.shape)
+        return x

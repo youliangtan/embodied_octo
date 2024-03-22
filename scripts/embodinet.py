@@ -96,11 +96,11 @@ def make_embodinet(type: str, latent_dim: int):
     else:
         raise ValueError("Invalid model type")
 
-# TODO: use different loss function
-
 
 def triplet_loss(anchor, positive, negative, margin=0.2):
-    """Define triplet loss"""
+    """Define triplet loss
+    # TODO: use different loss function
+    """
     pos_dist = jnp.sum(jnp.square(anchor - positive), axis=1)
     neg_dist = jnp.sum(jnp.square(anchor - negative), axis=1)
     basic_loss = pos_dist - neg_dist + margin
