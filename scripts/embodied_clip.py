@@ -98,8 +98,8 @@ class TrajectoryEncoder(nn.Module):
         )
 
         # flatten the action
-        action = action.reshape((action.shape[0], -1))
-        x = jnp.hstack([x, action])  # now concatenate x and action
+        actions = actions.reshape((actions.shape[0], -1))
+        x = jnp.hstack([x, actions])  # now concatenate x and action
         # MLP
         x = nn.Dense(512)(x)
         x = nn.relu(x)
@@ -141,7 +141,7 @@ class TrajectoryAttentionEncoder(nn.Module):
             num_heads=4,
             dropout_prob=0.15,
             input_dropout_prob=0.05
-        )(x, return_embedding=True)
+        )(x, return_embedding=True, train=is_training)
         return x
 
 
@@ -193,6 +193,7 @@ def validate_model(
             data['images'],
             state_actions,
             is_training=False,
+            mutable=False,
             rngs=rngs,
         )
         preds_denorm = denormalize(preds, norm_info['cam_profile'])
@@ -207,7 +208,7 @@ def validate_model(
     print(
         f" - Val | Average Diff: {pretty_list(diff_norm)}, with avg mse: {mse/num_samples}")
 
-    wandb.log({"average_mse": mse/num_samples})
+    wandb.log({"average_test_mse": mse/num_samples})
     for i in range(len(diff_norm)):
         wandb.log({f"diff_norm_{i}": diff_norm[i]})
 
@@ -227,10 +228,8 @@ def validate_model(
 def baseline_predictor(test_ds_iter, norm_info, num_samples=10, random_pred=False):
     """Random predictor for the camera profile."""
     mse = 0
-    rng = random.PRNGKey(0)
     avg_preds = jnp.zeros((7))
     for i in range(num_samples):
-        rng, key = random.split(rng)
         data = next(test_ds_iter)
         cam_profile = jnp.array(data['cam_profile'])
         norm_cam_profile = normalize(cam_profile, norm_info['cam_profile'])
@@ -336,7 +335,7 @@ if __name__ == "__main__":
     norm_info = calc_norm_info(iterator)
 
     @jax.jit
-    def train_step(state, batch, rngs):
+    def train_step(train_state, batch, rngs):
         def loss_fn(params):
             # forward pass,
             images, states, actions, cam_profile = \
@@ -349,7 +348,7 @@ if __name__ == "__main__":
 
             # TODO: now assume states as actions, need to change
             preds, updates = model.apply(
-                {'params': params, 'batch_stats': state.batch_stats},
+                {'params': params, 'batch_stats': train_state.batch_stats},
                 images,
                 state_actions,
                 rngs=rngs,
@@ -373,16 +372,16 @@ if __name__ == "__main__":
 
         # compute the gradient
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        (loss, (metrics, updates)), grad = grad_fn(state.params)  # Unpack the auxiliary data
+        (loss, (metrics, updates)), grad = grad_fn(train_state.params)  # Unpack the auxiliary data
 
         # update the optimizer TODO: is this needed?
-        new_state = state.apply_gradients(grads=grad)
-        state = state.replace(
-            params=new_state.params,
-            opt_state=new_state.opt_state,
+        train_state = train_state.apply_gradients(grads=grad)
+        train_state = train_state.replace(
+            params=train_state.params,
+            opt_state=train_state.opt_state,
             batch_stats=updates['batch_stats']
         )
-        return new_state, loss, metrics
+        return train_state, loss, metrics
 
     # initialize the model
     rng = random.PRNGKey(0)
@@ -419,7 +418,7 @@ if __name__ == "__main__":
     )
 
     test_dataset = TrajectoryDataset(
-        test_dataset_dir, traj_size=args.traj_length, random_skip=True)
+        test_dataset_dir, traj_size=args.traj_length)
     test_dataset = test_dataset.get_dataset()
     test_dataset = test_dataset.batch(args.batch_size).repeat()
     test_ds_iter = iter(test_dataset)
@@ -452,22 +451,22 @@ if __name__ == "__main__":
 
         # log after first epoch
         if epoch > 0:
-            wandb.log({"average_loss": avg_loss, "average_train_mse": avg_train_mse})
-            validate_model(test_ds_iter, model, train_state, norm_info)
             wandb.log(timer.get_average_times(reset=True))
         else:
             timer.reset()
+        wandb.log({"average_loss": avg_loss, "average_train_mse": avg_train_mse})
+        validate_model(test_ds_iter, model, train_state, norm_info)
+
+        # save the model every 50 epochs
+        if args.save_path and epoch > 0 and epoch % 50 == 0:
+            # support ~ and cwd for full path
+            full_path = os.path.expanduser(args.save_path)
+            checkpoints.save_checkpoint(
+                full_path, train_state, overwrite=True, step=0
+            )
+            print(f"Model saved to {full_path}")
 
     print("Done training")
-
-    # save the model
-    if args.save_path:
-        # support ~ and cwd for full path
-        full_path = os.path.expanduser(args.save_path)
-        checkpoints.save_checkpoint(
-            full_path, train_state, overwrite=True, step=0
-        )
-        print(f"Model saved to {full_path}")
 
     print("\n ---------- Validating Model ----------")
     baseline_predictor(test_ds_iter, norm_info)

@@ -16,6 +16,11 @@ os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 def pretty_list(x): return [round(float(i), 2) for i in x]
 
 
+def img_preprocess(img):
+    # Normalize the image to [0, 1]
+    return img / 255.0
+
+
 class TrajectoryDataset:
     def __init__(
         self,
@@ -23,6 +28,8 @@ class TrajectoryDataset:
         use_npy: bool = True,
         traj_size: int = 15,
         random_skip: bool = False,
+        max_traj_size: int = 15,
+        random_traj_sampling: bool = True,
     ):
         """
         Simple script to create a tf.data.Dataset from a directory of .npy files.
@@ -38,9 +45,12 @@ class TrajectoryDataset:
         self.data_directory = data_directory
         self.traj_size = traj_size
         self.random_skip = random_skip
+        self.max_traj_size = max_traj_size
+        self.random_traj_sampling = random_traj_sampling
 
         if not use_npy:
             raise NotImplementedError
+
 
     def _trajectory_generator(self):
         # List all .npy files in the data directory
@@ -77,11 +87,18 @@ class TrajectoryDataset:
                 actions = np.zeros((self.traj_size, 7))
                 cam_profile = traj[0]['observation']['info/pixels_profile']
 
+                # Randomly sample a trajectory of size self.traj_size in 
+                # the current trajectory
+                if self.random_traj_sampling:
+                    start_idx = random.randint(
+                        0, len(traj) - self.traj_size - 1)
+                    traj = traj[start_idx:start_idx + self.traj_size]
+
                 # Iterate over the transitions in the trajectory
                 for i, transition in enumerate(traj):
                     if i == self.traj_size:
                         break
-                    images[i] = transition['observation']['image']
+                    images[i] = img_preprocess(transition['observation']['image'])
                     states[i] = transition['observation']['state']
                     actions[i] = transition['action']
 
@@ -188,7 +205,7 @@ if __name__ == "__main__":
     parser.add_argument('--data_path', '-d', type=str, help='Path to dataset')
     args = parser.parse_args()
 
-    td = TrajectoryDataset(args.data_path)
+    td = TrajectoryDataset(args.data_path, traj_size=6, random_skip=True)
     dataset = td.get_dataset()
     dataset = dataset.repeat()
 
