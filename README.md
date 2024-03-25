@@ -20,5 +20,5 @@ python data_collection/collect_scripted.py --task widowx_shoe_pick_and_place  -d
 2. Train the model with the generated dataset:
 
 ```bash
-python3 embodied_clip.py -d /hdd/mujoco_arms/widowx_shoe_pick_and_place_combined/ -b 16 -t 12 -e 100
+python3 embodied_clip.py -d /hdd/mujoco_arms/sviewpoint_combine/ -b 20 -t 6 -e 250 -m transformer -n largetrans-b20-lr-2e-5-reg1e-4 -lr 0.00002
 ```

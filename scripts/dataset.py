@@ -5,11 +5,15 @@ import numpy as np
 import tensorflow_datasets as tfds
 import os
 import random
+import jax.numpy as jnp
 
 # This is similar to tf.config.experimental.set_memory_growth,
 # which sets the GPU memory growth as needed basis to prevent OOM
 # https://www.tensorflow.org/guide/gpu
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+
+
+def pretty_list(x): return [round(float(i), 2) for i in x]
 
 
 class TrajectoryDataset:
@@ -38,7 +42,7 @@ class TrajectoryDataset:
         if not use_npy:
             raise NotImplementedError
 
-    def trajectory_generator(self):
+    def _trajectory_generator(self):
         # List all .npy files in the data directory
         files = [f for f in os.listdir(
             self.data_directory) if f.endswith('.npy')]
@@ -106,7 +110,7 @@ class TrajectoryDataset:
 
         # Create the dataset from the generator
         dataset = tf.data.Dataset.from_generator(
-            self.trajectory_generator,
+            self._trajectory_generator,
             output_types=output_types,
             output_shapes=output_shapes
         )
@@ -114,9 +118,68 @@ class TrajectoryDataset:
 
 
 ##############################################################################
+
+
+def calc_norm_info(
+    data_iter,
+    feature_keys=['cam_profile', 'states', 'actions'],
+    type='jnp',
+):
+    """
+    Return the normalization info for the dataset.
+
+    format is: { key_str: (min, max)}
+    """
+    norm_info = {}
+    data = next(data_iter)
+
+    for f in feature_keys:
+        if len(data[f].shape) == 2:
+            axis = 0
+        elif len(data[f].shape) == 3:
+            axis = (0, 1)
+        else:
+            raise ValueError(f"unsupported shape for {f} in calc_norm_info")
+
+        # init norm info with (norm_min, norm_max)
+        norm_info[f] = (
+            tf.reduce_min(data[f], axis=axis),
+            tf.reduce_max(data[f], axis=axis)
+        )
+        for i in range(100):
+            data = next(data_iter)
+            norm_info[f] = (
+                tf.minimum(norm_info[f][0], tf.reduce_min(data[f], axis=axis)),
+                tf.maximum(norm_info[f][1], tf.reduce_max(data[f], axis=axis))
+            )
+
+        # convert values to jnp or numpy, default is tf
+        if type == 'jnp':
+            norm_info[f] = (jnp.array(norm_info[f][0]),
+                            jnp.array(norm_info[f][1]))
+        elif type == 'np':
+            norm_info[f] = (norm_info[f][0].numpy(), norm_info[f][1].numpy())
+
+        norm_min, norm_max = norm_info[f]
+        print(
+            f"[Norm info] {f}: min {pretty_list(norm_min)}, max {pretty_list(norm_max)}")
+
+    return norm_info
+
+
+def normalize(x, norm_min_max):
+    """Normalize data to [0, 1] range."""
+    min_val, max_val = norm_min_max
+    return (x - min_val) / (max_val - min_val)
+
+
+def denormalize(x, norm_min_max):
+    """Denormalize data from [0, 1] range."""
+    min_val, max_val = norm_min_max
+    return x * (max_val - min_val) + min_val
+
+
 ##############################################################################
-
-
 if __name__ == "__main__":
     import argparse
     import os
@@ -127,21 +190,34 @@ if __name__ == "__main__":
 
     td = TrajectoryDataset(args.data_path)
     dataset = td.get_dataset()
-    # dataset = dataset.repeat()
+    dataset = dataset.repeat()
 
     batched_dataset = dataset.batch(16)
 
     # use iterator to get the data
     iterator = iter(batched_dataset)
 
-    for i in range(50):
+    # Get the normalization info
+    norm_info = calc_norm_info(iterator)
+
+    for i in range(10):
         print(f"Batch {i}")
 
         try:
             data = next(iterator)
-            # print(data.keys())
-            # print(data['cam_profile'])
-            # print(data['states'].shape)
+
+            # Normalize the data
+            norm_states = normalize(
+                jnp.array(data['states']), norm_info['states'])
+            norm_actions = normalize(data['actions'], norm_info['actions'])
+            norm_cam_profile = normalize(
+                data['cam_profile'], norm_info['cam_profile'])
+
+            # pick batch index 0 to print
+            print(f" States: {pretty_list(norm_states[0][0])}")
+            print(f" Actions: {pretty_list(norm_actions[0][0])}")
+            print(f" Cam Profile: {pretty_list(norm_cam_profile[0])}")
+
         except StopIteration:
             print("No more items in iterator")
             break
